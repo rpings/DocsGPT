@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     EMBEDDINGS_BASE_URL: Optional[str] = None  # Remote embeddings API URL (OpenAI-compatible)
     EMBEDDINGS_KEY: Optional[str] = None  # api key for embeddings (if using openai, just copy API_KEY)
     EMBEDDINGS_MAX_INPUT_TOKENS: Optional[int] = None  # truncate each remote embed input to N tokens (overflow lost)
+    # Ingest batching: chunks per embedding request (classic_chunk caps at
+    # 1250 tokens, so 6 chunks stay under the API's per-request input
+    # limit) and the number of concurrent embed calls per ingest.
+    EMBED_BATCH_SIZE: int = 6
+    EMBED_MAX_WORKERS: int = 4
     # Optional directory of operator-supplied model YAMLs, loaded after the
     # built-in catalog under application/core/models/. Later wins on
     # duplicate model id. See application/core/models/README.md.

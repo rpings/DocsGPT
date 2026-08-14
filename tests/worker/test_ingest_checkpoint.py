@@ -89,21 +89,23 @@ class TestEmbedCheckpoint:
         docs = _make_docs(5)
         captured_chunks: list[str] = []
 
-        def _fake_add(store, doc, sid):
-            captured_chunks.append(doc.page_content)
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured_chunks.extend(texts)
+            return texts, []
 
         # The retry decorator wraps the real fn. Patch the module-level name
         # so our loop calls the spy directly.
         import application.parser.embedding_pipeline as ep_mod
 
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = _fake_add
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock()
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # Faiss seeds the store with docs[0]; the loop picks up at idx=1.
         assert captured_chunks == ["chunk-1", "chunk-2", "chunk-3", "chunk-4"]
@@ -136,17 +138,19 @@ class TestEmbedCheckpoint:
 
         captured_chunks: list[str] = []
 
-        def _fake_add(store, doc, sid):
-            captured_chunks.append(doc.page_content)
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured_chunks.extend(texts)
+            return texts, []
 
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = _fake_add
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock()
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # On resume the FAISS store is loaded from storage (no docs_init);
         # the loop iterates the un-popped docs list starting at resume_index.
@@ -187,14 +191,14 @@ class TestEmbedCheckpoint:
         docs = _make_docs(6)
         _seed_progress_row(pg_conn, source_id, total=6, last_index=2)
 
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = lambda store, doc, sid: None
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = lambda store, batch, sid: ([], [])
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock()
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         assert len(captured_kwargs) == 1
         # No ``docs_init`` on resume — this is what triggers FaissStore to
@@ -245,17 +249,21 @@ class TestEmbedCheckpoint:
         )
 
         captured: list[str] = []
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = (
-            lambda store, doc, sid: captured.append(doc.page_content)
-        )
+
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured.extend(texts)
+            return texts, []
+
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock(),
                 attempt_id="att-A",
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # Same attempt → resume past the last persisted index.
         assert captured == ["chunk-3", "chunk-4", "chunk-5"]
@@ -278,17 +286,21 @@ class TestEmbedCheckpoint:
         docs = _make_docs(5)
 
         captured: list[str] = []
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = (
-            lambda store, doc, sid: captured.append(doc.page_content)
-        )
+
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured.extend(texts)
+            return texts, []
+
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock(),
                 attempt_id="att-new",
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # Fresh attempt → reset to chunk 0; FAISS branch seeds with
         # docs[0] and the loop picks up at idx=1.
@@ -327,17 +339,21 @@ class TestEmbedCheckpoint:
         docs = _make_docs(5)
 
         captured: list[str] = []
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = (
-            lambda store, doc, sid: captured.append(doc.page_content)
-        )
+
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured.extend(texts)
+            return texts, []
+
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock(),
                 attempt_id="sync-2",
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # All non-seed chunks re-embedded under the new attempt.
         assert captured == ["chunk-1", "chunk-2", "chunk-3", "chunk-4"]
@@ -358,16 +374,20 @@ class TestEmbedCheckpoint:
         docs = _make_docs(4)
 
         captured: list[str] = []
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = (
-            lambda store, doc, sid: captured.append(doc.page_content)
-        )
+
+        def _fake_embed(store, batch, sid):
+            texts = [doc.page_content for doc in batch]
+            captured.extend(texts)
+            return texts, []
+
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = _fake_embed
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock(),
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         # Resumed past last_index=1.
         assert captured == ["chunk-2", "chunk-3"]
@@ -426,15 +446,15 @@ class TestEmbedCheckpoint:
         source_id = str(uuid.uuid4())
         docs = _make_docs(4)
 
-        original = ep_mod.add_text_to_store_with_retry
-        ep_mod.add_text_to_store_with_retry = lambda store, doc, sid: None
+        original = ep_mod.embed_texts_with_retry
+        ep_mod.embed_texts_with_retry = lambda store, batch, sid: ([], [])
         try:
             ep_mod.embed_and_store_documents(
                 docs, str(tmp_path), source_id, MagicMock(),
                 attempt_id="att-multi",
             )
         finally:
-            ep_mod.add_text_to_store_with_retry = original
+            ep_mod.embed_texts_with_retry = original
 
         row = pg_conn.execute(
             text(

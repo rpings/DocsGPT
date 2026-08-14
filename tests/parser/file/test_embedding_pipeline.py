@@ -41,6 +41,8 @@ def test_add_text_to_store_with_retry_success():
 @pytest.fixture
 def mock_settings(monkeypatch):
     mock_settings = MagicMock()
+    mock_settings.EMBED_BATCH_SIZE = 6
+    mock_settings.EMBED_MAX_WORKERS = 4
     monkeypatch.setattr(
         "application.parser.embedding_pipeline.settings", mock_settings
     )
@@ -57,7 +59,10 @@ def mock_vector_creator(monkeypatch):
 
 
 
-def test_embed_and_store_documents_creates_folder(tmp_path, mock_settings, mock_vector_creator):
+@patch("application.parser.embedding_pipeline.embed_texts_with_retry")
+def test_embed_and_store_documents_creates_folder(
+    mock_embed_retry, tmp_path, mock_settings, mock_vector_creator
+):
     mock_settings.VECTOR_STORE = "faiss"
 
     docs = [MagicMock(page_content="doc1", metadata={}), MagicMock(page_content="doc2", metadata={})]
@@ -65,6 +70,7 @@ def test_embed_and_store_documents_creates_folder(tmp_path, mock_settings, mock_
     source_id = "xyz"
     task_status = MagicMock()
 
+    mock_embed_retry.return_value = (["doc2"], [[0.1]])
     mock_store = MagicMock()
     mock_vector_creator.create_vectorstore.return_value = mock_store
 
@@ -123,11 +129,11 @@ def test_embed_and_store_documents_progress_band(
     assert currents == sorted(currents)
 
 
-@patch("application.parser.embedding_pipeline.add_text_to_store_with_retry")
+@patch("application.parser.embedding_pipeline.embed_texts_with_retry")
 def test_embed_and_store_documents_partial_failure_raises(
-    mock_add_retry, tmp_path, mock_settings, mock_vector_creator, caplog
+    mock_embed_retry, tmp_path, mock_settings, mock_vector_creator, caplog
 ):
-    """Regression: a per-chunk failure must escape the function so
+    """Regression: a batch failure must escape the function so
     Celery's autoretry_for can fire and ``with_idempotency`` doesn't
     cache a partial index as ``completed``. Pre-fix, this branch
     swallowed and returned success.
@@ -146,11 +152,12 @@ def test_embed_and_store_documents_partial_failure_raises(
     mock_vector_creator.create_vectorstore.return_value = mock_store
 
     # First document succeeds (FAISS init seeds with docs[0]; the loop
-    # picks up at idx=1 and raises on the bad chunk).
+    # picks up at idx=1 and raises on the bad chunk's batch).
     def side_effect(*args, **kwargs):
-        if "bad" in args[1].page_content:
+        if any("bad" in d.page_content for d in args[1]):
             raise RuntimeError("Embedding failed")
-    mock_add_retry.side_effect = side_effect
+        return ["good"], [[0.1]]
+    mock_embed_retry.side_effect = side_effect
 
     with caplog.at_level(logging.ERROR):
         with pytest.raises(EmbeddingPipelineError) as exc_info:
@@ -160,14 +167,14 @@ def test_embed_and_store_documents_partial_failure_raises(
 
     # Original cause is chained via ``raise ... from`` for diagnostics.
     assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert "Error embedding document" in caplog.text
+    assert "Error embedding batch" in caplog.text
     # Partial save still ran (chunks that did embed are flushed to disk).
     mock_store.save_local.assert_called()
 
 
-@patch("application.parser.embedding_pipeline.add_text_to_store_with_retry")
+@patch("application.parser.embedding_pipeline.embed_texts_with_retry")
 def test_embed_and_store_documents_all_chunks_succeed_no_raise(
-    mock_add_retry, tmp_path, mock_settings, mock_vector_creator,
+    mock_embed_retry, tmp_path, mock_settings, mock_vector_creator,
 ):
     """Happy path: no exception escapes when every chunk succeeds."""
     mock_settings.VECTOR_STORE = "faiss"
@@ -176,6 +183,7 @@ def test_embed_and_store_documents_all_chunks_succeed_no_raise(
         MagicMock(page_content="a", metadata={}),
         MagicMock(page_content="b", metadata={}),
     ]
+    mock_embed_retry.return_value = (["b"], [[0.1]])
     mock_store = MagicMock()
     mock_vector_creator.create_vectorstore.return_value = mock_store
 

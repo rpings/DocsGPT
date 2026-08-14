@@ -1,6 +1,7 @@
 import os
 import logging
-from typing import Any, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, List, Optional, Tuple
 from retry import retry
 from tqdm import tqdm
 from application.core.settings import settings
@@ -57,11 +58,55 @@ def add_text_to_store_with_retry(store: Any, doc: Any, source_id: str) -> None:
     try:
         # Sanitize content to remove NUL characters that cause ingestion failures
         doc.page_content = sanitize_content(doc.page_content)
-        
+
         doc.metadata["source_id"] = str(source_id)
         store.add_texts([doc.page_content], metadatas=[doc.metadata])
     except Exception as e:
         logging.error(f"Failed to add document with retry: {e}", exc_info=True)
+        raise
+
+
+# Embedding dominates index wall clock for remote embeddings backends:
+# each request pays a full round trip, so one request per chunk stalls the
+# loop on latency. Chunks are embedded in fixed-size batches
+# (settings.EMBED_BATCH_SIZE) across a few workers
+# (settings.EMBED_MAX_WORKERS). FAISS-only for now — other stores embed
+# inside ``add_texts`` and keep the per-chunk path.
+
+
+@retry(tries=3, delay=5, backoff=2)
+def embed_texts_with_retry(
+    store: Any, batch_docs: List[Any], source_id: str
+) -> Tuple[List[str], List[Any]]:
+    """Embed one batch of documents and return ``(texts, embeddings)``.
+
+    The network-bound half of ingesting a batch, split from the index
+    mutation so FAISS batches can embed concurrently (FAISS itself is
+    not thread-safe).
+
+    Raises:
+        Exception: If embedding fails after all retry attempts, or the
+            backend returns a different vector count than requested.
+    """
+    try:
+        texts = []
+        for doc in batch_docs:
+            doc.page_content = sanitize_content(doc.page_content)
+            doc.metadata["source_id"] = str(source_id)
+            texts.append(doc.page_content)
+        embeddings = store.embeddings.embed_documents(texts)
+        if len(embeddings) != len(texts):
+            raise ValueError(
+                f"Embedding backend returned {len(embeddings)} vectors "
+                f"for {len(texts)} chunks"
+            )
+        return texts, embeddings
+    except Exception as e:
+        logging.error(
+            f"Failed to embed batch of {len(batch_docs)} documents "
+            f"with retry: {e}",
+            exc_info=True,
+        )
         raise
 
 
@@ -269,24 +314,44 @@ def embed_and_store_documents(
         # tripwire still validates ``embedded == total`` afterwards.
         loop_start = total_docs
 
-    # Process and embed documents
+    # Process and embed documents. FAISS embeds batches concurrently and
+    # adds them serially via precomputed embeddings; other stores keep
+    # the per-chunk path.
     chunk_error: Exception | None = None
     failed_idx: int | None = None
     last_published_pct = -1
     source_id_str = str(source_id)
     progress_span = progress_end - progress_start
-    for idx in tqdm(
-        range(loop_start, total_docs),
-        desc="Embedding 🦖",
-        unit="docs",
-        total=total_docs - loop_start,
-        bar_format="{l_bar}{bar}| Time Left: {remaining}",
-    ):
-        doc = docs[idx]
-        try:
+    batches = [
+        docs[i : i + settings.EMBED_BATCH_SIZE]
+        for i in range(loop_start, total_docs, settings.EMBED_BATCH_SIZE)
+    ]
+
+    pool = None
+    futures: List[Any] = []
+    if settings.VECTOR_STORE == "faiss" and batches:
+        pool = ThreadPoolExecutor(max_workers=settings.EMBED_MAX_WORKERS)
+        futures = [
+            pool.submit(embed_texts_with_retry, store, batch, source_id)
+            for batch in batches
+        ]
+
+    cursor = loop_start
+    try:
+        for pos, batch in enumerate(
+            tqdm(
+                batches,
+                desc="Embedding 🦖",
+                unit="batch",
+                total=len(batches),
+                bar_format="{l_bar}{bar}| Time Left: {remaining}",
+            )
+        ):
+            batch_last = cursor + len(batch) - 1
+
             # Map the embed loop into [progress_start, progress_end].
             progress = progress_start + int(
-                ((idx + 1) / total_docs) * progress_span
+                ((batch_last + 1) / total_docs) * progress_span
             )
             task_status.update_state(state="PROGRESS", meta={"current": progress})
 
@@ -301,28 +366,54 @@ def embed_and_store_documents(
                     {
                         "current": progress,
                         "total": total_docs,
-                        "embedded_chunks": idx + 1,
+                        "embedded_chunks": batch_last + 1,
                         "stage": "embedding",
                     },
                     scope={"kind": "source", "id": source_id_str},
                 )
                 last_published_pct = progress
 
-            # Add document to vector store
-            add_text_to_store_with_retry(store, doc, source_id)
-            _record_progress(source_id, last_index=idx, embedded_chunks=idx + 1)
-        except Exception as e:
-            chunk_error = e
-            failed_idx = idx
-            logging.error(f"Error embedding document {idx}: {e}", exc_info=True)
-            logging.info(f"Saving progress at document {idx} out of {total_docs}")
-            try:
-                store.save_local(folder_name)
-                logging.info("Progress saved successfully")
-            except Exception as save_error:
-                logging.error(f"CRITICAL: Failed to save progress: {save_error}", exc_info=True)
-                # Continue without breaking to attempt final save
-            break
+            if settings.VECTOR_STORE == "faiss":
+                texts, embeddings = futures[pos].result()
+                # 0.19.0's FaissStore has no langchain wrapper; _append is
+                # the precomputed-vector entry (add_texts would re-embed).
+                store._append(
+                    texts,
+                    metadatas=[doc.metadata for doc in batch],
+                    vectors=embeddings,
+                )
+            else:
+                for doc in batch:
+                    add_text_to_store_with_retry(store, doc, source_id)
+            _record_progress(
+                source_id,
+                last_index=batch_last,
+                embedded_chunks=batch_last + 1,
+            )
+            cursor = batch_last + 1
+    except Exception as e:
+        chunk_error = e
+        failed_idx = cursor
+        logging.error(
+            f"Error embedding batch at document {cursor}: {e}", exc_info=True
+        )
+        logging.info(
+            f"Saving progress at document {cursor} out of {total_docs}"
+        )
+        try:
+            store.save_local(folder_name)
+            logging.info("Progress saved successfully")
+        except Exception as save_error:
+            logging.error(
+                f"CRITICAL: Failed to save progress: {save_error}",
+                exc_info=True,
+            )
+            # Continue without breaking to attempt final save
+    finally:
+        if pool is not None:
+            # Do not wait for stragglers a failed batch left running —
+            # the autoretry resumes from the last checkpoint anyway.
+            pool.shutdown(wait=False, cancel_futures=True)
 
     # Save the vector store
     if settings.VECTOR_STORE == "faiss":
