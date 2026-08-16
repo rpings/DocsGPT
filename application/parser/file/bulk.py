@@ -154,6 +154,20 @@ def get_default_file_extractor(
 DEFAULT_FILE_EXTRACTOR: Dict[str, BaseParser] = get_default_file_extractor()
 
 
+def get_source_file_extractor() -> Dict[str, BaseParser]:
+    """Extractor for source ingestion (knowledge-base indexing).
+
+    Like :func:`get_default_file_extractor`, but PDFs go through the
+    pypdfium2 text layer with no docling fallback: docling needs its
+    layout models from the HuggingFace Hub, and the sandbox has no
+    direct internet. PDFs without a text layer (scans) raise
+    ``DocumentParseError`` and land in ``failed_files``.
+    """
+    extractor = get_default_file_extractor()
+    extractor[".pdf"] = _wrap_pdf_fast_path(None)
+    return extractor
+
+
 class SimpleDirectoryReader(BaseReader):
     """Simple directory reader.
 

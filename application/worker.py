@@ -23,7 +23,11 @@ from application.parser.embedding_pipeline import (
     assert_index_complete,
     embed_and_store_documents,
 )
-from application.parser.file.bulk import SimpleDirectoryReader, get_default_file_extractor
+from application.parser.file.bulk import (
+    SimpleDirectoryReader,
+    get_default_file_extractor,
+    get_source_file_extractor,
+)
 from application.parser.file.constants import SUPPORTED_SOURCE_EXTENSIONS
 from application.parser.remote.remote_creator import (
     RemoteCreator,
@@ -623,6 +627,7 @@ def ingest_worker(
             if sample:
                 logging.info(f"Sample mode enabled. Using {limit} documents.")
             reader = SimpleDirectoryReader(
+                file_extractor=get_source_file_extractor(),
                 input_dir=temp_dir,
                 input_files=input_files,
                 recursive=recursive,
@@ -833,6 +838,7 @@ def reingest_source_worker(self, source_id, user):
             _download_source_files_to_dir(storage, source_file_path, temp_dir)
 
             reader = SimpleDirectoryReader(
+                file_extractor=get_source_file_extractor(),
                 input_dir=temp_dir,
                 recursive=True,
                 required_exts=list(SUPPORTED_SOURCE_EXTENSIONS),
@@ -977,6 +983,7 @@ def reingest_source_worker(self, source_id, user):
 
                         if added_local_files:
                             reader_new = SimpleDirectoryReader(
+                                file_extractor=get_source_file_extractor(),
                                 input_files=added_local_files,
                                 exclude_hidden=True,
                                 errors="ignore",
@@ -2137,6 +2144,7 @@ def ingest_connector(
                 state="PROGRESS", meta={"current": 40, "status": "Processing files"}
             )
             reader = SimpleDirectoryReader(
+                file_extractor=get_source_file_extractor(),
                 input_dir=temp_dir,
                 recursive=True,
                 required_exts=list(SUPPORTED_SOURCE_EXTENSIONS),

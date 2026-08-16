@@ -508,3 +508,20 @@ class TestGetDefaultFileExtractor:
             mock_fn.return_value = {".pdf": MagicMock(), ".md": MagicMock()}
             result = mock_fn()
             assert ".pdf" in result
+
+
+@pytest.mark.unit
+class TestGetSourceFileExtractor:
+
+    def test_pdf_is_text_layer_parser_without_fallback(self):
+        """Source ingestion must not touch docling: PDFs go through the
+        pypdfium2 text layer with no model-dependent fallback."""
+        from application.parser.file.bulk import get_source_file_extractor
+        from application.parser.file.pdfium_parser import PdfiumTextParser
+
+        result = get_source_file_extractor()
+        pdf_parser = result[".pdf"]
+        assert isinstance(pdf_parser, PdfiumTextParser)
+        assert pdf_parser.fallback_parser is None
+        # Non-PDF entries stay on the default extractor.
+        assert ".md" in result
