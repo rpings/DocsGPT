@@ -38,9 +38,10 @@ RUN python3.12 -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 # Install Python packages
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir tiktoken && \
-    pip install --no-cache-dir -r requirements.txt
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir --upgrade pip -i ${PIP_INDEX_URL} && \
+    pip install --no-cache-dir tiktoken -i ${PIP_INDEX_URL} && \
+    pip install --no-cache-dir -r requirements.txt -i ${PIP_INDEX_URL}
 
 # Final Stage
 FROM ubuntu:24.04 as final
