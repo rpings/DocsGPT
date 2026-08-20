@@ -101,6 +101,25 @@ class TestFaissStore:
         """FAISS has no threshold knob; the kwarg must be ignored, not raise."""
         assert populated.search("Paris", k=1, score_threshold=0.9)
 
+    def test_keyword_search_ranks_by_term_overlap(self, populated):
+        hits = populated.keyword_search("database", k=2)
+        assert len(hits) == 1
+        assert hits[0].metadata["source"] == "db.txt"
+
+    def test_keyword_search_ignores_no_match_queries(self, populated):
+        assert populated.keyword_search("zzzz", k=2) == []
+
+    def test_keyword_search_on_empty_index_returns_empty(self, make_store):
+        store = make_store(docs_init=[_SeedDoc("only doc", {})])
+        store.delete_index()
+        assert store.keyword_search("doc") == []
+
+    def test_keyword_search_matches_cjk_bigrams(self, populated):
+        populated.add_texts(["数据库查询优化"], [{"source": "zh.txt"}])
+        hits = populated.keyword_search("数据库", k=2)
+        assert len(hits) == 1
+        assert hits[0].metadata["source"] == "zh.txt"
+
     def test_search_on_empty_index_returns_empty(self, make_store):
         store = make_store(docs_init=[_SeedDoc("only doc", {})])
         store.delete_index()

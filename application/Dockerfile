@@ -91,6 +91,12 @@ ENV MALLOC_ARENA_MAX=2 \
 EXPOSE 7091
 
 # Switch to non-root user
+# 预热 tiktoken 编码缓存：cl100k_base 编码文件默认从
+# openaipublic.blob.core.windows.net 下载，沙箱出口对公网 TLS 抖动会
+# 间歇掐断下载，导致 DocsGPT /stream 首次 tokenize 失败并被包装成
+# 通用 SSE error。预烘焙进镜像（缓存目录 /tmp/data-gym-cache 不依赖
+# HOME，root 与 appuser 均可命中）。
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 USER appuser
 
 # BoundedDrainUvicornWorker makes max_requests recycles safe with held-open SSE

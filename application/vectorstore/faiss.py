@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import re
 import tempfile
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,27 @@ from application.vectorstore.faiss_docstore import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TERM_RE = re.compile(r"[a-z0-9]+")
+_CJK_RUN_RE = re.compile(r"[一-鿿]+")
+
+
+def _lexical_terms(text: str) -> List[str]:
+    """Lowercased alphanumeric tokens of ``text``; CJK runs become bigrams.
+
+    DocsGPT's chunking leaves CJK text as contiguous runs, where plain
+    tokenization would yield one opaque term per line — bigrams keep a
+    Chinese corpus searchable (and the hybrid retriever non-inert).
+    """
+    lowered = text.lower()
+    terms = _TERM_RE.findall(lowered)
+    for run in _CJK_RUN_RE.findall(lowered):
+        if len(run) == 1:
+            terms.append(run)
+        else:
+            terms.extend(run[i : i + 2] for i in range(len(run) - 1))
+    return terms
+
 
 # Sidecar holding chunk text and the row->id mapping. ``index.json`` is what
 # this version writes; ``index.pkl`` is langchain's historical format, still
@@ -195,6 +217,30 @@ class FaissStore(BaseVectorStore):
             if document is not None:
                 results.append((document, float(distance)))
         return results
+
+    def keyword_search(self, question: str, k: int = 10) -> List[Document]:
+        """Lexical search over the in-memory docstore.
+
+        The docstore (``index.json`` sidecar) already holds every chunk's
+        text, so chunks are ranked by summed query-term frequency without
+        an external index. This backs the hybrid retriever's RRF fusion on
+        the faiss topology — without it ``BaseVectorStore.keyword_search``
+        returns ``[]`` and hybrid degrades to vector-only.
+        """
+        terms = _lexical_terms(question)
+        if not terms or not self.documents:
+            return []
+
+        scored = []
+        for doc_id, stored in self.documents.items():
+            counts = {}
+            for term in _lexical_terms(stored.get("page_content", "")):
+                counts[term] = counts.get(term, 0) + 1
+            score = sum(counts.get(term, 0) for term in terms)
+            if score > 0:
+                scored.append((doc_id, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [self._to_document(doc_id) for doc_id, _ in scored[:k]]
 
     # -- Mutation --------------------------------------------------------
 
